@@ -1,9 +1,10 @@
-"""Tool definitions with in-tool permission checks, hidden context, and out-of-band confidential data delivery.
+"""Tool definitions with permissions, hidden context, confidential RAG, and Human-in-the-Loop (HITL) tools.
 """
 
-from typing import Dict
+import uuid
+from typing import Dict, Optional
 from pydantic_ai import RunContext, Tool
-from models import UserContext, ConfidentialDelivery
+from models import UserContext, ConfidentialDelivery, PendingAction
 
 # --- Mock Knowledge Base for General Topics ---
 TOPIC_DATA = {
@@ -29,6 +30,10 @@ CONFIDENTIAL_DOCUMENTATION = {
 }
 
 
+# ==============================================================================
+# Standard & Confidential Tools
+# ==============================================================================
+
 async def get_topic_information(ctx: RunContext[UserContext], topic: str) -> str:
     """Retrieve detailed information about a specific topic.
     
@@ -36,16 +41,15 @@ async def get_topic_information(ctx: RunContext[UserContext], topic: str) -> str
         topic: The topic identifier to look up (e.g., 'topic_a', 'topic_b').
     """
     normalized_topic = topic.strip().lower()
-    
-    # In-Tool Permission Check (LLM is unaware of this validation)
     user = ctx.deps
+    
+    # In-Tool Permission Check
     if normalized_topic not in user.allowed_topics:
         return (
             f"Permission Denied: User '{user.username}' is not authorized "
             f"to view information on '{topic}'."
         )
 
-    # If authorized, retrieve topic data
     if normalized_topic in TOPIC_DATA:
         return f"Information for {topic}: {TOPIC_DATA[normalized_topic]}"
     else:
@@ -63,7 +67,7 @@ async def confidential_topic_rag(ctx: RunContext[UserContext], topic: str) -> st
     normalized_topic = topic.strip().lower()
     user = ctx.deps
     
-    # 1. Permission check for confidential topic
+    # Permission check for confidential topic
     if normalized_topic not in user.allowed_confidential_topics:
         return (
             f"Access Denied: User '{user.username}' does not have security clearance "
@@ -74,17 +78,13 @@ async def confidential_topic_rag(ctx: RunContext[UserContext], topic: str) -> st
         available = ", ".join(CONFIDENTIAL_DOCUMENTATION.keys())
         return f"Confidential topic '{topic}' not found. Available topics: {available}"
 
-    # 2. Retrieve the raw confidential content
+    # Retrieve and deliver out-of-band directly to user's payload
     full_content = CONFIDENTIAL_DOCUMENTATION[normalized_topic]
-
-    # 3. Deliver out-of-band directly to user's payload
-    # The LLM never sees ctx.deps.confidential_deliveries
     user.confidential_deliveries.append(
         ConfidentialDelivery(topic=topic, content=full_content)
     )
 
-    # 4. Return REDACTED receipt to the LLM
-    # The LLM only sees that delivery happened, not the actual secret text.
+    # Return REDACTED receipt to the LLM
     return (
         f"[REDACTED RECEIPT]: Confidential documentation for '{topic}' has been successfully "
         f"retrieved and dispatched directly to the user's secure side-channel. "
@@ -101,13 +101,12 @@ async def query_database(ctx: RunContext[UserContext], table_name: str) -> str:
     """
     user = ctx.deps
     
-    # Secondary in-tool safety check
     if "database_query" not in user.allowed_tools:
         return f"Security Error: User '{user.username}' lacks database querying privileges."
 
     mock_db = {
         "users": "Table 'users': [ID 1: Alice (Admin), ID 2: Bob (Analyst), ID 3: Charlie (Guest)]",
-        "audit_logs": "Table 'audit_logs': [2026-09-09 10:15: User Alice performed backup]",
+        "audit_logs": "Table 'audit_logs': [2026-09-15 10:15: User Alice performed backup]",
         "transactions": "Table 'transactions': [TX1092: $5,400 completed, TX1093: $1,200 pending]",
     }
     
@@ -117,10 +116,87 @@ async def query_database(ctx: RunContext[UserContext], table_name: str) -> str:
     return f"Table '{table_name}' not found. Available tables: {', '.join(mock_db.keys())}"
 
 
+# ==============================================================================
+# Human-In-The-Loop (HITL) Tools
+# ==============================================================================
+
+async def request_report_export(
+    ctx: RunContext[UserContext],
+    report_name: str,
+    format: Optional[str] = None,
+) -> str:
+    """Export an analytical report. If 'format' is not provided, the tool pauses and
+    presents structured format options directly to the client UI for selection.
+    
+    Args:
+        report_name: The name of the report to export (e.g., 'financial_q3', 'traffic_metrics').
+        format: The export format ('Executive Summary', 'Full Raw Logs', 'CSV Format').
+    """
+    user = ctx.deps
+    if "request_report_export" not in user.allowed_tools:
+        return f"Security Error: User '{user.username}' lacks permission to export reports."
+
+    valid_formats = ["Executive Summary", "Full Raw Logs", "CSV Format"]
+
+    # If no valid format was provided yet, pause and register pending action for client UI
+    if not format or format not in valid_formats:
+        action_id = f"act-{uuid.uuid4().hex[:6]}"
+        user.pending_action = PendingAction(
+            action_id=action_id,
+            action_type="selection",
+            prompt=f"Please select an export format for report '{report_name}':",
+            options=valid_formats,
+        )
+        return (
+            f"ACTION_REQUIRED: The client UI is being presented with format options: {valid_formats}. "
+            f"Action ID: {action_id}. Acknowledge to the user that you are waiting for their format selection."
+        )
+
+    # When format has been chosen by the user
+    mock_data = {
+        "Executive Summary": f"=== EXECUTIVE SUMMARY: {report_name.upper()} ===\n• Key Takeaway: Growth rate +18% YoY.\n• Status: Operational.",
+        "Full Raw Logs": f"=== RAW LOGS: {report_name.upper()} ===\n[2026-09-15 12:00:01] event=sync status=ok latency=14ms\n[2026-09-15 12:00:02] event=report_calc cpu=42%",
+        "CSV Format": f"metric,period,value\nrevenue,q3,450000\nactive_users,q3,12400\nchurn_rate,q3,0.03",
+    }
+    return f"Report '{report_name}' generated successfully ({format}):\n\n{mock_data.get(format)}"
+
+
+async def execute_critical_system_action(
+    ctx: RunContext[UserContext],
+    action_name: str,
+    confirmed: bool = False,
+) -> str:
+    """Execute a critical infrastructure or high-risk administrative action.
+    Requires VERBAL human confirmation in natural chat before execution.
+    
+    Args:
+        action_name: The operation to execute (e.g., 'restart_primary_cluster', 'flush_redis_cache').
+        confirmed: Set to True ONLY if the user has explicitly confirmed this action verbally in chat history.
+    """
+    user = ctx.deps
+    if "execute_critical_system_action" not in user.allowed_tools:
+        return f"Security Error: User '{user.username}' lacks privileges to execute critical system operations."
+
+    if not confirmed:
+        return (
+            f"VERBAL CONFIRMATION REQUIRED: Action '{action_name}' is a high-risk system operation. "
+            f"The user has NOT confirmed it yet. Do NOT execute this action now. "
+            f"In your response, verbally ask the user: 'Are you sure you want to proceed with {action_name}?' "
+            f"and wait for their verbal response."
+        )
+
+    # User confirmed verbally in previous turn
+    return (
+        f"SUCCESS: Critical system operation '{action_name}' has been executed successfully "
+        f"under authorization of user '{user.username}'."
+    )
+
+
 # --- Tool Registry ---
-# Maps tool permission identifiers to Tool instances
 TOOL_REGISTRY: Dict[str, Tool[UserContext]] = {
     "topic_info": Tool(get_topic_information, takes_ctx=True),
     "confidential_topic_rag": Tool(confidential_topic_rag, takes_ctx=True),
     "database_query": Tool(query_database, takes_ctx=True),
+    "request_report_export": Tool(request_report_export, takes_ctx=True),
+    "execute_critical_system_action": Tool(execute_critical_system_action, takes_ctx=True),
 }

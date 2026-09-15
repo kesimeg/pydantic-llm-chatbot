@@ -7,7 +7,6 @@ from pydantic_ai import Agent, Tool
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.vllm import VLLMProvider
 
-
 from models import UserContext
 from tools import TOOL_REGISTRY
 
@@ -24,7 +23,7 @@ def get_model() -> OpenAIChatModel:
     return OpenAIChatModel(
     model_name,
     provider=VLLMProvider(base_url=base_url),
-    )   
+    ) 
 
 
 def get_permitted_tools(user: UserContext) -> List[Tool[UserContext]]:
@@ -55,11 +54,19 @@ def create_agent_for_user(user: UserContext) -> Agent[UserContext, str]:
         tools=permitted_tools,
         system_prompt=(
             "You are a helpful and secure enterprise assistant.\n"
-            "Help the user with their queries using your available tools.\n"
-            "- When asked for confidential internal documents or secrets, use the 'confidential_topic_rag' tool.\n"
-            "- For confidential tools, you will receive a redacted receipt because the raw text is "
+            "Help the user with their queries using your available tools.\n\n"
+            "Security & Tool Guidelines:\n"
+            "1. Confidential Data: When asked for confidential internal documents or secrets, "
+            "use 'confidential_topic_rag'. You will receive a redacted receipt because the raw text is "
             "transmitted directly to the user's secure display out-of-band.\n"
-            "- If a tool or topic is restricted or denied, explain the restriction politely."
+            "2. Structured Human-in-the-Loop (Report Export): When asked to export a report, use 'request_report_export'. "
+            "If the user didn't specify an export format, omit the format argument; the system will present options "
+            "directly to the user UI.\n"
+            "3. Verbal Human-in-the-Loop (Critical System Actions): When asked to perform a high-risk operation, "
+            "use 'execute_critical_system_action'. If the user has NOT explicitly confirmed it in the chat history, "
+            "set confirmed=False and verbally ask the user in natural language for confirmation. Only set confirmed=True "
+            "if the user explicitly gave their verbal consent in a preceding turn.\n"
+            "4. Permissions: If a tool or topic is restricted or denied, explain the restriction politely."
         ),
     )
 
