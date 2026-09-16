@@ -15,11 +15,12 @@ class ConfidentialDelivery:
 
 @dataclass
 class PendingAction:
-    """Represents a paused tool action awaiting structured human input."""
+    """Represents a paused tool action awaiting structured human input (e.g. button click)."""
     action_id: str
-    action_type: str  # e.g. "selection" or "confirmation"
+    action_type: str  # e.g. "button_selection" or "confirmation"
     prompt: str
     options: List[str]
+    report_name: Optional[str] = None
 
 
 @dataclass
@@ -37,6 +38,7 @@ class UserContext:
     allowed_confidential_topics: List[str] = field(default_factory=list)
     confidential_deliveries: List[ConfidentialDelivery] = field(default_factory=list)
     pending_action: Optional[PendingAction] = None
+    selected_format: Optional[str] = None  # Injected in background upon button click (LLM never sees it)
 
 
 # --- In-Memory Mock User Database ---
@@ -50,7 +52,7 @@ USERS_DATABASE = {
             "topic_info",
             "database_query",
             "confidential_topic_rag",
-            "request_report_export",         # Structured HITL (options sent to UI)
+            "request_report_export",         # Structured HITL (button trigger, background injected)
             "execute_critical_system_action" # Verbal HITL (LLM asks in conversation)
         ],
         allowed_topics=["topic_a", "topic_b"],
@@ -63,7 +65,7 @@ USERS_DATABASE = {
         allowed_tools=[
             "topic_info",
             "confidential_topic_rag",
-            "request_report_export",         # Bob can export reports
+            "request_report_export",         # Bob can export reports via buttons
             # Bob CANNOT execute critical system actions or query the database
         ],
         allowed_topics=["topic_b"],
@@ -90,8 +92,8 @@ class ChatRequest(BaseModel):
 class ResumeRequest(BaseModel):
     user_id: str = Field(..., description="User ID resuming the action", example="user_alice")
     session_id: str = Field(..., description="Active session ID", example="session-101")
-    action_id: str = Field(..., description="ID of the pending action", example="act-8f2b")
-    selected_option: str = Field(..., description="The option selected by the user", example="CSV Format")
+    action_id: str = Field(..., description="ID of the pending action", example="btn-8f2b")
+    selected_option: str = Field(..., description="The button option clicked by the user", example="CSV Format")
 
 
 class ChatResponse(BaseModel):
@@ -106,4 +108,4 @@ class ChatResponse(BaseModel):
     )
     action_id: Optional[str] = Field(None, description="Action ID if status is 'needs_action'")
     action_prompt: Optional[str] = Field(None, description="Prompt describing the required human decision")
-    options: Optional[List[str]] = Field(None, description="List of options presented to the user")
+    options: Optional[List[str]] = Field(None, description="List of options presented to the user as buttons")

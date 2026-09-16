@@ -1,12 +1,13 @@
 """Offline test suite using Pydantic AI's TestModel.
 Verifies tool filtering, in-tool permissions, confidential redaction,
-Structured HITL, Verbal HITL, and multi-turn chat history.
+Button HITL background injection, Verbal HITL, and message history inspection.
 Run with: python test_offline.py
 """
 
 import asyncio
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.messages import UserPromptPart, ToolCallPart, ToolReturnPart, TextPart
 
 from models import USERS_DATABASE, UserContext
 from tools import (
@@ -49,25 +50,28 @@ async def test_tool_visibility_filtering():
     print("[PASS] Tool visibility filtering verified.")
 
 
-async def test_structured_hitl_tool():
-    print("\n--- Test 2: Verifying Structured HITL Tool (Report Export) ---")
+async def test_button_hitl_background_injection():
+    print("\n--- Test 2: Verifying Button HITL (Background Format Injection) ---")
     alice = USERS_DATABASE["user_alice"]
     alice.pending_action = None
+    alice.selected_format = None
     ctx = MockContext(deps=alice)
 
-    # 1. Calling tool without format -> pauses and sets pending_action
+    # 1. Calling tool with report_name only (NO format parameter in signature)
     res_pause = await request_report_export(ctx, report_name="q3_financial")
-    print(f"Tool response without format:\n  {res_pause}")
-    assert "ACTION_REQUIRED" in res_pause
+    print(f"Tool response without button click:\n  {res_pause}")
+    assert "PAUSED_FOR_USER_BUTTON" in res_pause
     assert alice.pending_action is not None
     assert alice.pending_action.options == ["Executive Summary", "Full Raw Logs", "CSV Format"]
-    print(f"Pending Action registered in context: {alice.pending_action}")
+    print(f"Button options dispatched: {alice.pending_action.options}")
 
-    # 2. Resuming tool with format provided
-    res_complete = await request_report_export(ctx, report_name="q3_financial", format="CSV Format")
-    print(f"\nTool response with format ('CSV Format'):\n  {res_complete}")
+    # 2. Human clicks button: Injected in background via ctx.deps.selected_format!
+    alice.selected_format = "CSV Format"
+    res_complete = await request_report_export(ctx, report_name="q3_financial")
+    print(f"\nTool response after button injection:\n  {res_complete}")
     assert "revenue,q3,450000" in res_complete
-    print("[PASS] Structured HITL pause-and-resume logic verified.")
+    assert alice.selected_format is None  # consumed
+    print("[PASS] Button HITL background format injection verified.")
 
 
 async def test_verbal_hitl_tool():
@@ -104,35 +108,41 @@ async def test_confidential_out_of_band_delivery():
     print("[PASS] Confidential redaction verified.")
 
 
-async def test_multi_turn_history():
-    print("\n--- Test 5: Verifying Multi-Turn History in Agent ---")
+async def test_message_history_inspection():
+    print("\n--- Test 5: Verifying Message History Inspection via all_messages() ---")
     alice = USERS_DATABASE["user_alice"]
-    test_model = TestModel()
+    
+    test_model = TestModel(call_tools=['get_topic_information'])
     agent = Agent(model=test_model, deps_type=UserContext, tools=get_permitted_tools(alice))
 
-    # Turn 1
-    result1 = await agent.run("Hello, my favorite color is emerald blue.", deps=alice)
-    history1 = result1.all_messages()
-    print(f"Turn 1 completed. Messages in history: {len(history1)}")
+    result = await agent.run("Tell me about topic_a", deps=alice)
+    messages = result.all_messages()
+    print(f"Total messages in history: {len(messages)}")
 
-    # Turn 2 with history passed
-    result2 = await agent.run("What did I say my favorite color was?", deps=alice, message_history=history1)
-    history2 = result2.all_messages()
-    print(f"Turn 2 completed. Messages in history: {len(history2)}")
+    parts_found = []
+    for msg in messages:
+        for part in msg.parts:
+            parts_found.append(part.__class__.__name__)
+            if isinstance(part, ToolCallPart):
+                print(f"Inspected Tool Call: tool='{part.tool_name}', args={part.args}")
+            elif isinstance(part, ToolReturnPart):
+                print(f"Inspected Tool Return: tool='{part.tool_name}', content='{part.content[:40]}...'")
 
-    assert len(history2) > len(history1)
-    print("[PASS] Multi-turn history accumulation verified.")
+    assert "ToolCallPart" in parts_found
+    assert "ToolReturnPart" in parts_found
+    print(f"Parts successfully inspected: {set(parts_found)}")
+    print("[PASS] all_messages() inspection verified.")
 
 
 async def main():
-    print("================================================================")
-    print("Running Pydantic AI Comprehensive Test Suite (HITL + History)")
-    print("================================================================")
+    print("==================================================================")
+    print("Running Pydantic AI Comprehensive Test Suite (Buttons + Inspection)")
+    print("==================================================================")
     await test_tool_visibility_filtering()
-    await test_structured_hitl_tool()
+    await test_button_hitl_background_injection()
     await test_verbal_hitl_tool()
     await test_confidential_out_of_band_delivery()
-    await test_multi_turn_history()
+    await test_message_history_inspection()
     print("\nAll offline tests passed successfully!")
 
 

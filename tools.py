@@ -2,7 +2,7 @@
 """
 
 import uuid
-from typing import Dict, Optional
+from typing import Dict
 from pydantic_ai import RunContext, Tool
 from models import UserContext, ConfidentialDelivery, PendingAction
 
@@ -106,7 +106,7 @@ async def query_database(ctx: RunContext[UserContext], table_name: str) -> str:
 
     mock_db = {
         "users": "Table 'users': [ID 1: Alice (Admin), ID 2: Bob (Analyst), ID 3: Charlie (Guest)]",
-        "audit_logs": "Table 'audit_logs': [2026-09-15 10:15: User Alice performed backup]",
+        "audit_logs": "Table 'audit_logs': [2026-09-16 10:15: User Alice performed backup]",
         "transactions": "Table 'transactions': [TX1092: $5,400 completed, TX1093: $1,200 pending]",
     }
     
@@ -123,14 +123,14 @@ async def query_database(ctx: RunContext[UserContext], table_name: str) -> str:
 async def request_report_export(
     ctx: RunContext[UserContext],
     report_name: str,
-    format: Optional[str] = None,
 ) -> str:
-    """Export an analytical report. If 'format' is not provided, the tool pauses and
-    presents structured format options directly to the client UI for selection.
+    """Export an analytical report for a given topic or dataset.
+    The LLM triggers this tool with the report name only. The format options are 
+    presented directly to the human as UI buttons, and the selected format is injected 
+    in the background without the LLM ever needing to see or choose the format argument.
     
     Args:
         report_name: The name of the report to export (e.g., 'financial_q3', 'traffic_metrics').
-        format: The export format ('Executive Summary', 'Full Raw Logs', 'CSV Format').
     """
     user = ctx.deps
     if "request_report_export" not in user.allowed_tools:
@@ -138,27 +138,35 @@ async def request_report_export(
 
     valid_formats = ["Executive Summary", "Full Raw Logs", "CSV Format"]
 
-    # If no valid format was provided yet, pause and register pending action for client UI
-    if not format or format not in valid_formats:
-        action_id = f"act-{uuid.uuid4().hex[:6]}"
+    # Step 1: If no button has been pressed yet, pause and emit button options to the client UI
+    if not user.selected_format or user.selected_format not in valid_formats:
+        action_id = f"btn-{uuid.uuid4().hex[:6]}"
         user.pending_action = PendingAction(
             action_id=action_id,
-            action_type="selection",
-            prompt=f"Please select an export format for report '{report_name}':",
+            action_type="button_selection",
+            prompt=f"Please click a format button to export report '{report_name}':",
             options=valid_formats,
+            report_name=report_name,
         )
         return (
-            f"ACTION_REQUIRED: The client UI is being presented with format options: {valid_formats}. "
-            f"Action ID: {action_id}. Acknowledge to the user that you are waiting for their format selection."
+            f"PAUSED_FOR_USER_BUTTON: Format buttons have been dispatched directly to the user's interface. "
+            f"Action ID: {action_id}. The user will click a button to select a format. "
+            f"Acknowledge to the user that you are waiting for their button selection."
         )
 
-    # When format has been chosen by the user
+    # Step 2: Human clicked the button! The format was injected out-of-band into ctx.deps.selected_format
+    fmt = user.selected_format
+    user.selected_format = None  # Consume and reset
+
     mock_data = {
         "Executive Summary": f"=== EXECUTIVE SUMMARY: {report_name.upper()} ===\n• Key Takeaway: Growth rate +18% YoY.\n• Status: Operational.",
-        "Full Raw Logs": f"=== RAW LOGS: {report_name.upper()} ===\n[2026-09-15 12:00:01] event=sync status=ok latency=14ms\n[2026-09-15 12:00:02] event=report_calc cpu=42%",
+        "Full Raw Logs": f"=== RAW LOGS: {report_name.upper()} ===\n[2026-09-16 10:00:01] event=sync status=ok latency=14ms\n[2026-09-16 10:00:02] event=report_calc cpu=42%",
         "CSV Format": f"metric,period,value\nrevenue,q3,450000\nactive_users,q3,12400\nchurn_rate,q3,0.03",
     }
-    return f"Report '{report_name}' generated successfully ({format}):\n\n{mock_data.get(format)}"
+    return (
+        f"Report '{report_name}' generated successfully via human button selection ({fmt}):\n\n"
+        f"{mock_data.get(fmt)}"
+    )
 
 
 async def execute_critical_system_action(

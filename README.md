@@ -1,31 +1,39 @@
 # Pydantic AI Permission-Aware Chatbot API with Human-in-the-Loop (HITL)
 
-A FastAPI-based chatbot system built with **Pydantic AI** enforcing dynamic tool filtering, hidden context injection, out-of-band confidential payload delivery, in-memory multi-turn chat history, and two forms of Human-in-the-Loop (HITL) interaction.
+A FastAPI-based chatbot system built with **Pydantic AI** enforcing dynamic tool filtering, hidden context injection, out-of-band confidential payload delivery, in-memory multi-turn chat history, two distinct forms of Human-in-the-Loop (HITL) interaction, and full conversation history/tool inspection.
 
 ---
 
 ## Key Features
 
-1. **In-Memory Multi-Turn Chat History (`session_id`)**:
-   - Conversations are tracked in-memory using `(user_id, session_id)` mapping to Pydantic AI `ModelMessage` history.
-   - Allows users to maintain continuous multi-turn conversations or switch threads by passing a different `session_id`.
+1. **Button Trigger HITL (`request_report_export`) with Background Format Injection**:
+   - **No Argument Leaking to LLM**: The LLM's tool schema only accepts `report_name: str`. It has **no** `format` parameter.
+   - **Button Emission**: When invoked, the tool pauses and emits format buttons (`["Executive Summary", "Full Raw Logs", "CSV Format"]`) to the client UI.
+   - **Background Injection**: The human clicks a button on the UI, and the selection is injected into `ctx.deps.selected_format` behind the scenes via `/chat/resume`. The LLM never sees or chooses the format argument.
 
-2. **Structured Human-in-the-Loop (`request_report_export`)**:
-   - **Pause-and-Resume Pattern**: If the tool is invoked without a chosen format, it pauses execution and sends structured options (`["Executive Summary", "Full Raw Logs", "CSV Format"]`) to the client UI.
-   - The client selects an option and posts to `/chat/resume`, allowing the tool to complete its work.
-
-3. **Verbal Human-in-the-Loop (`execute_critical_system_action`)**:
-   - High-risk operations (e.g. `restart_primary_cluster`) require verbal confirmation.
+2. **Verbal HITL (`execute_critical_system_action`)**:
+   - High-risk operations (e.g. `restart_primary_cluster`) require conversational confirmation.
    - The tool instructs the LLM to ask the user verbally in chat: *"Are you sure you want to restart the primary cluster?"*.
-   - In the subsequent turn, the LLM reads conversation history, detects the user's verbal approval, and executes the action with `confirmed=True`.
+   - In the subsequent turn, the LLM reads conversation history, detects the user's verbal consent, and re-executes the tool with `confirmed=True`.
 
-4. **Confidential Out-of-Band Delivery (`confidential_topic_rag`)**:
+3. **Message History & Tool Inspection (`.all_messages()`)**:
+   - Endpoint `GET /sessions/{user_id}/{session_id}/history` and method `client.print_history()` allow inspecting:
+     - Exact tools called by the model and the arguments passed.
+     - Tool outputs and return observations.
+     - Model thinking / reasoning tokens (`ThinkingPart`).
+     - Multi-turn request and response sequences.
+
+4. **In-Memory Multi-Turn Chat History (`session_id`)**:
+   - Conversations are tracked in-memory using `(user_id, session_id)` mapping to Pydantic AI `ModelMessage` history.
+   - Users can maintain continuous multi-turn conversations or switch threads by passing a different `session_id`.
+
+5. **Confidential Out-of-Band Delivery (`confidential_topic_rag`)**:
    - Sensitive documentation (e.g. `quantum_keys`) is delivered directly to the user's API response payload.
-   - The LLM receives only a **redacted receipt**—raw secrets never touch the model's prompt or context window.
+   - The LLM receives only a **redacted receipt**—raw secrets never touch the model's prompt, context window, or message history.
 
-5. **Dynamic Tool Filtering & Hidden Context (`RunContext[Deps]`)**:
+6. **Dynamic Tool Filtering & Hidden Context (`RunContext[Deps]`)**:
    - The system provisions an `Agent` with **only** the tools the user has permission to view.
-   - Internal clearances and `user_id` are injected into tools via `ctx.deps` without the LLM's knowledge.
+   - Clearances and `user_id` are injected into tools via `ctx.deps` without the LLM's knowledge.
 
 ---
 
@@ -45,14 +53,14 @@ Declared in `models.py`:
 
 - **`models.py`**: Pydantic schemas (`ChatRequest`, `ResumeRequest`, `ChatResponse`, `PendingAction`, `ConfidentialDelivery`), `UserContext`, and `USERS_DATABASE`.
 - **`tools.py`**:
-  - `request_report_export`: Structured HITL tool (pauses for UI format selection).
-  - `execute_critical_system_action`: Verbal HITL tool (requires conversational confirmation).
+  - `request_report_export`: Button trigger HITL tool (background format injection).
+  - `execute_critical_system_action`: Verbal HITL tool (conversational confirmation).
   - `confidential_topic_rag`: Out-of-band delivery with LLM redaction.
   - `get_topic_information`: In-tool topic clearance checks.
   - `query_database`: Restricted tool for senior analysts.
 - **`agent_factory.py`**: Dynamically builds agents with model configuration (`OPENAI_BASE_URL` support) and permitted tools.
-- **`main.py`**: FastAPI application managing sessions, `/chat`, `/chat/resume`, and session lifecycle.
-- **`client.py`**: Reusable Python client class with support for interactive input loops and HITL resuming.
+- **`main.py`**: FastAPI application managing sessions, `/chat`, `/chat/resume`, `/sessions/{user_id}/{session_id}/history`, and session lifecycle.
+- **`client.py`**: Reusable Python client class with `print_history()` inspection and interactive chat loop.
 - **`client_notebook.ipynb`**: Ready-to-run Jupyter notebook testing all features step-by-step.
 - **`test_offline.py`**: Offline test suite using Pydantic AI's `TestModel` to verify all logic without an LLM.
 
@@ -89,7 +97,7 @@ Open and run [client_notebook.ipynb](file:///home/ege/Desktop/Pytorch/Pydantic%2
 jupyter notebook client_notebook.ipynb
 ```
 
-Or test via Python in your terminal / script:
+Or test via Python:
 ```python
 from client import ChatClient
 
@@ -99,10 +107,9 @@ client = ChatClient(base_url="http://127.0.0.1:8000", user_id="user_alice")
 client.chat("Hello, my favorite project code name is 'Project Phoenix'.")
 client.chat("What was my favorite project code name?")
 
-# Structured HITL
+# Button trigger HITL (format injected in background)
 client.chat("Export the financial_q3 report.")
 
-# Verbal HITL
-client.chat("Restart the primary cluster.")
-client.chat("Yes, I confirm. Please restart the primary cluster.")
+# Inspect tool calls, arguments, and thinking process!
+client.print_history()
 ```
