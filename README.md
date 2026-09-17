@@ -1,68 +1,64 @@
-# Pydantic AI Permission-Aware Chatbot API with Human-in-the-Loop (HITL)
+# Pydantic AI Modular, Permission-Aware Chatbot API
 
-A FastAPI-based chatbot system built with **Pydantic AI** enforcing dynamic tool filtering, hidden context injection, out-of-band confidential payload delivery, in-memory multi-turn chat history, two distinct forms of Human-in-the-Loop (HITL) interaction, and full conversation history/tool inspection.
+A decoupled, extensible chatbot system built with **Pydantic AI** and **FastAPI**. It enforces dynamic tool filtering, hidden context injection, out-of-band data delivery, in-memory multi-turn chat history, two distinct forms of Human-in-the-Loop (HITL) interaction, and complete conversation history inspection.
 
 ---
 
-## Key Features
+## Architectural Highlights
 
-1. **Button Trigger HITL (`request_report_export`) with Background Format Injection**:
-   - **No Argument Leaking to LLM**: The LLM's tool schema only accepts `report_name: str`. It has **no** `format` parameter.
-   - **Button Emission**: When invoked, the tool pauses and emits format buttons (`["Executive Summary", "Full Raw Logs", "CSV Format"]`) to the client UI.
-   - **Background Injection**: The human clicks a button on the UI, and the selection is injected into `ctx.deps.selected_format` behind the scenes via `/chat/resume`. The LLM never sees or chooses the format argument.
+### 1. Fully Decoupled & Adaptable Data Models
+- **`ConfidentialDelivery`**: A generic out-of-band payload container (`content: str`, optional `label: str`, `metadata: dict`). Any tool can deliver sensitive data (confidential documents, analytical reports, raw database dumps) directly to the user client without exposing tokens to the LLM.
+- **`PendingAction`**: Generic representation of a paused tool state (`action_id`, `prompt`, `options`, `tool_name`, `context_data: dict`, `resume_instruction`). Completely tool-agnostic.
+- **`UserContext`**: Generic user permissions store (`permissions: Dict[str, Any]`, `last_selected_option`, `action_selections`). No hardcoded tool-specific fields.
 
-2. **Verbal HITL (`execute_critical_system_action`)**:
-   - High-risk operations (e.g. `restart_primary_cluster`) require conversational confirmation.
-   - The tool instructs the LLM to ask the user verbally in chat: *"Are you sure you want to restart the primary cluster?"*.
-   - In the subsequent turn, the LLM reads conversation history, detects the user's verbal consent, and re-executes the tool with `confirmed=True`.
+### 2. Encapsulated Mock Data Inside Tools
+All mock dictionaries (knowledge base topics, confidential documents, database tables, and analytical reports) are encapsulated directly **inside the tool functions** in [tools.py](file:///home/ege/Desktop/Pytorch/Pydantic%20Bot/tools.py). Replacing any mock tool with a real database or external API requires changing only that specific function.
 
-3. **Message History & Tool Inspection (`.all_messages()`)**:
-   - Endpoint `GET /sessions/{user_id}/{session_id}/history` and method `client.print_history()` allow inspecting:
-     - Exact tools called by the model and the arguments passed.
-     - Tool outputs and return observations.
-     - Model thinking / reasoning tokens (`ThinkingPart`).
-     - Multi-turn request and response sequences.
+### 3. Out-of-Band Report Delivery
+In `request_report_export`, the generated report (CSV, Raw Logs, or Executive Summary) is delivered via `ConfidentialDelivery` directly to the user's client. The LLM receives only a confirmation receipt, ensuring raw metrics and table dumps do not consume or pollute the model's context window.
 
-4. **In-Memory Multi-Turn Chat History (`session_id`)**:
-   - Conversations are tracked in-memory using `(user_id, session_id)` mapping to Pydantic AI `ModelMessage` history.
-   - Users can maintain continuous multi-turn conversations or switch threads by passing a different `session_id`.
+### 4. Generic Resume Endpoint (`POST /chat/resume`)
+The resume endpoint in [main.py](file:///home/ege/Desktop/Pytorch/Pydantic%20Bot/main.py) is completely decoupled from specific tools. When a human selects an option (button click), the choice is injected into `ctx.deps.last_selected_option` in the background and the tool resumes using the metadata stored in `PendingAction`.
 
-5. **Confidential Out-of-Band Delivery (`confidential_topic_rag`)**:
-   - Sensitive documentation (e.g. `quantum_keys`) is delivered directly to the user's API response payload.
-   - The LLM receives only a **redacted receipt**—raw secrets never touch the model's prompt, context window, or message history.
+### 5. Two Clear HITL Patterns
+- **Button Trigger (Background Injected)**: The LLM schema for `request_report_export` only takes `(report_name: str)`. It has **no** format parameter. The tool emits button options to the UI, the user clicks a button, and the choice is injected out-of-band without the LLM ever handling or seeing the format argument.
+- **Verbal Confirmation (Conversational)**: `execute_critical_system_action` checks `confirmed: bool = False`. The LLM verbally asks the user for confirmation in natural language, and executes on the next turn after reading user approval from the chat history.
 
-6. **Dynamic Tool Filtering & Hidden Context (`RunContext[Deps]`)**:
-   - The system provisions an `Agent` with **only** the tools the user has permission to view.
-   - Clearances and `user_id` are injected into tools via `ctx.deps` without the LLM's knowledge.
+### 6. Message History & Tool Inspection (`.all_messages()`)
+- `GET /sessions/{user_id}/{session_id}/history` and `client.print_history()` allow inspecting:
+  - Exact tools called and arguments passed.
+  - Tool return observations.
+  - Model thinking / reasoning tokens (`ThinkingPart`).
+  - Raw Pydantic AI message structures.
 
 ---
 
 ## Mock User Clearances & Tools
 
-Declared in `models.py`:
+Declared in [models.py](file:///home/ege/Desktop/Pytorch/Pydantic%20Bot/models.py):
 
-| User ID | Role | Allowed Tools | Standard Topics | Confidential Topics |
-| :--- | :--- | :--- | :--- | :--- |
-| `user_alice` | Senior Analyst | `["topic_info", "database_query", "confidential_topic_rag", "request_report_export", "execute_critical_system_action"]` | `["topic_a", "topic_b"]` | `["quantum_keys", "payroll_audit"]` |
-| `user_bob` | Junior Analyst | `["topic_info", "confidential_topic_rag", "request_report_export"]` *(No database or critical actions)* | `["topic_b"]` | `["payroll_audit"]` |
-| `user_charlie` | Guest | `[]` *(Zero tools visible)* | `[]` | `[]` |
+| User ID | Role | Allowed Tools | Permissions Scope |
+| :--- | :--- | :--- | :--- |
+| `user_alice` | Senior Analyst | `["topic_info", "database_query", "confidential_topic_rag", "request_report_export", "execute_critical_system_action"]` | Topics: `[topic_a, topic_b]`, Clearances: `[quantum_keys, payroll_audit]` |
+| `user_bob` | Junior Analyst | `["topic_info", "confidential_topic_rag", "request_report_export"]` *(No database or critical actions)* | Topics: `[topic_b]`, Clearances: `[payroll_audit]` |
+| `user_charlie` | Guest | `[]` *(Zero tools visible to LLM)* | No permissions |
 
 ---
 
 ## Project Structure
 
-- **`models.py`**: Pydantic schemas (`ChatRequest`, `ResumeRequest`, `ChatResponse`, `PendingAction`, `ConfidentialDelivery`), `UserContext`, and `USERS_DATABASE`.
+- **`models.py`**: Generic Pydantic schemas (`ChatRequest`, `ResumeRequest`, `ChatResponse`, `PendingAction`, `ConfidentialDelivery`), `UserContext`, and `USERS_DATABASE`.
 - **`tools.py`**:
-  - `request_report_export`: Button trigger HITL tool (background format injection).
+  - `request_report_export`: Button trigger HITL tool with out-of-band `ConfidentialDelivery`.
   - `execute_critical_system_action`: Verbal HITL tool (conversational confirmation).
   - `confidential_topic_rag`: Out-of-band delivery with LLM redaction.
   - `get_topic_information`: In-tool topic clearance checks.
-  - `query_database`: Restricted tool for senior analysts.
-- **`agent_factory.py`**: Dynamically builds agents with model configuration (`OPENAI_BASE_URL` support) and permitted tools.
+  - `query_database`: Restricted database tool.
+- **`agent_factory.py`**: Dynamically builds agents with model configuration and filtered tools.
 - **`main.py`**: FastAPI application managing sessions, `/chat`, `/chat/resume`, `/sessions/{user_id}/{session_id}/history`, and session lifecycle.
 - **`client.py`**: Reusable Python client class with `print_history()` inspection and interactive chat loop.
 - **`client_notebook.ipynb`**: Ready-to-run Jupyter notebook testing all features step-by-step.
-- **`test_offline.py`**: Offline test suite using Pydantic AI's `TestModel` to verify all logic without an LLM.
+- **`test_offline.py`**: Offline test suite using Pydantic AI's `TestModel` to verify all decoupled logic without an LLM.
 
 ---
 
@@ -73,31 +69,23 @@ Declared in `models.py`:
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables (For your deployed model)
-```bash
-# Example: Local model (vLLM, Ollama, LM Studio, etc.)
-export OPENAI_BASE_URL="http://localhost:8000/v1"
-export OPENAI_API_KEY="not-needed"
-export OPENAI_MODEL_NAME="your-deployed-model-name"
-```
-
-### 3. Run Offline Tests (No LLM Required)
+### 2. Run Offline Tests (No LLM Required)
 ```bash
 python test_offline.py
 ```
 
-### 4. Start the FastAPI Server
+### 3. Start the FastAPI Server
 ```bash
 uvicorn main:app --reload --port 8000
 ```
 
-### 5. Test in Jupyter Notebook
+### 4. Test in Jupyter Notebook
 Open and run [client_notebook.ipynb](file:///home/ege/Desktop/Pytorch/Pydantic%20Bot/client_notebook.ipynb) in Jupyter:
 ```bash
 jupyter notebook client_notebook.ipynb
 ```
 
-Or test via Python:
+Or test via Python in your terminal / script:
 ```python
 from client import ChatClient
 
@@ -107,7 +95,7 @@ client = ChatClient(base_url="http://127.0.0.1:8000", user_id="user_alice")
 client.chat("Hello, my favorite project code name is 'Project Phoenix'.")
 client.chat("What was my favorite project code name?")
 
-# Button trigger HITL (format injected in background)
+# Button trigger HITL (format injected in background, report delivered out-of-band)
 client.chat("Export the financial_q3 report.")
 
 # Inspect tool calls, arguments, and thinking process!

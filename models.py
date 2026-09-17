@@ -1,26 +1,32 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
 @dataclass
 class ConfidentialDelivery:
-    """Confidential payload delivered directly to the user out-of-band.
+    """General out-of-band data delivery payload delivered directly to the client.
     
-    The LLM NEVER sees this text in its context window or history.
+    The LLM NEVER sees this content in its context window, prompt, or message history.
+    Any tool can use this to deliver sensitive documents, reports, raw records, etc.
     """
-    topic: str
     content: str
+    label: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class PendingAction:
-    """Represents a paused tool action awaiting structured human input (e.g. button click)."""
+    """Generic representation of a tool action awaiting human input (buttons, approvals, selections).
+    
+    Fully adaptable to any tool without tool-specific arguments hardcoded.
+    """
     action_id: str
-    action_type: str  # e.g. "button_selection" or "confirmation"
     prompt: str
     options: List[str]
-    report_name: Optional[str] = None
+    tool_name: Optional[str] = None
+    context_data: Dict[str, Any] = field(default_factory=dict)
+    resume_instruction: Optional[str] = None
 
 
 @dataclass
@@ -34,15 +40,40 @@ class UserContext:
     username: str
     role: str
     allowed_tools: List[str] = field(default_factory=list)
-    allowed_topics: List[str] = field(default_factory=list)
-    allowed_confidential_topics: List[str] = field(default_factory=list)
+    
+    # Generic permissions store (e.g. {"topics": [...], "clearances": [...], ...})
+    permissions: Dict[str, Any] = field(default_factory=dict)
+    
+    # Generic out-of-band delivery buffer (cleared per request)
     confidential_deliveries: List[ConfidentialDelivery] = field(default_factory=list)
+    
+    # Generic pending action state
     pending_action: Optional[PendingAction] = None
-    selected_format: Optional[str] = None  # Injected in background upon button click (LLM never sees it)
+    
+    # Generic human selection storage: tool-agnostic
+    action_selections: Dict[str, Any] = field(default_factory=dict)
+    last_selected_option: Optional[str] = None
+
+    def deliver_confidential(self, content: str, label: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
+        """Helper for any tool to deliver data out-of-band without LLM visibility."""
+        self.confidential_deliveries.append(
+            ConfidentialDelivery(
+                content=content,
+                label=label,
+                metadata=metadata or {},
+            )
+        )
+
+    def has_permission(self, permission_category: str, item: str) -> bool:
+        """Helper to verify if a user has access to a specific permission scope."""
+        allowed = self.permissions.get(permission_category, [])
+        if isinstance(allowed, list):
+            return item.lower() in [str(x).lower() for x in allowed]
+        return False
 
 
 # --- In-Memory Mock User Database ---
-# Maps user_id -> UserContext
+# Maps user_id -> UserContext with generic permission scopes
 USERS_DATABASE = {
     "user_alice": UserContext(
         user_id="user_alice",
@@ -52,11 +83,13 @@ USERS_DATABASE = {
             "topic_info",
             "database_query",
             "confidential_topic_rag",
-            "request_report_export",         # Structured HITL (button trigger, background injected)
-            "execute_critical_system_action" # Verbal HITL (LLM asks in conversation)
+            "request_report_export",
+            "execute_critical_system_action",
         ],
-        allowed_topics=["topic_a", "topic_b"],
-        allowed_confidential_topics=["quantum_keys", "payroll_audit"],
+        permissions={
+            "topics": ["topic_a", "topic_b"],
+            "clearances": ["quantum_keys", "payroll_audit"],
+        },
     ),
     "user_bob": UserContext(
         user_id="user_bob",
@@ -65,19 +98,20 @@ USERS_DATABASE = {
         allowed_tools=[
             "topic_info",
             "confidential_topic_rag",
-            "request_report_export",         # Bob can export reports via buttons
-            # Bob CANNOT execute critical system actions or query the database
+            "request_report_export",
+            # Bob lacks database_query and execute_critical_system_action
         ],
-        allowed_topics=["topic_b"],
-        allowed_confidential_topics=["payroll_audit"],
+        permissions={
+            "topics": ["topic_b"],                     # Only topic_b
+            "clearances": ["payroll_audit"],            # Lacks quantum_keys
+        },
     ),
     "user_charlie": UserContext(
         user_id="user_charlie",
         username="Charlie (Guest)",
         role="guest",
-        allowed_tools=[],                     # No tools visible to LLM
-        allowed_topics=[],
-        allowed_confidential_topics=[],
+        allowed_tools=[],                               # Zero tools visible to LLM
+        permissions={},
     ),
 }
 
@@ -92,8 +126,8 @@ class ChatRequest(BaseModel):
 class ResumeRequest(BaseModel):
     user_id: str = Field(..., description="User ID resuming the action", example="user_alice")
     session_id: str = Field(..., description="Active session ID", example="session-101")
-    action_id: str = Field(..., description="ID of the pending action", example="btn-8f2b")
-    selected_option: str = Field(..., description="The button option clicked by the user", example="CSV Format")
+    action_id: str = Field(..., description="ID of the pending action", example="act-8f2b")
+    selected_option: str = Field(..., description="The option clicked or selected by the user", example="CSV Format")
 
 
 class ChatResponse(BaseModel):
@@ -104,7 +138,7 @@ class ChatResponse(BaseModel):
     visible_tools: List[str] = Field(..., description="List of tools the LLM was allowed to see for this user")
     confidential_deliveries: List[ConfidentialDelivery] = Field(
         default_factory=list,
-        description="Confidential payloads delivered directly to the user out-of-band",
+        description="Data payloads delivered directly to the user out-of-band",
     )
     action_id: Optional[str] = Field(None, description="Action ID if status is 'needs_action'")
     action_prompt: Optional[str] = Field(None, description="Prompt describing the required human decision")

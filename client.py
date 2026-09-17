@@ -204,10 +204,11 @@ class ChatClient:
         # Display confidential deliveries if any
         confidential = data.get("confidential_deliveries", [])
         if confidential:
-            print("🔒 [CONFIDENTIAL SECURE SIDE-CHANNEL PAYLOAD (Hidden from LLM)]:")
+            print("🔒 [OUT-OF-BAND SECURE SIDE-CHANNEL PAYLOAD (Hidden from LLM)]:")
             for item in confidential:
-                print(f"   --- Document: {item['topic']} ---")
-                for line in item['content'].splitlines():
+                label = item.get("label") or "Confidential Delivery"
+                print(f"   --- {label} ---")
+                for line in str(item.get("content", "")).splitlines():
                     print(f"   | {line}")
                 print("   --------------------------------------\n")
 

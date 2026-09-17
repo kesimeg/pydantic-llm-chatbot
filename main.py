@@ -1,6 +1,6 @@
 """FastAPI application providing chat endpoints with user permission filtering,
 in-memory session history, out-of-band confidential payload delivery,
-Human-In-The-Loop (HITL) button triggers, and message history inspection.
+generic Human-In-The-Loop (HITL) pause-and-resume, and history inspection.
 """
 
 import uuid
@@ -8,8 +8,6 @@ from typing import Dict, List, Tuple, Any
 from fastapi import FastAPI, HTTPException, status
 from pydantic_ai.messages import (
     ModelMessage,
-    ModelRequest,
-    ModelResponse,
     UserPromptPart,
     ToolCallPart,
     ToolReturnPart,
@@ -23,9 +21,9 @@ from models import USERS_DATABASE, ChatRequest, ChatResponse, ResumeRequest
 from agent_factory import create_agent_for_user
 
 app = FastAPI(
-    title="Pydantic AI Permission & HITL Chatbot API",
-    description="Chatbot API with permissions, in-memory chat history, confidential RAG, button HITL, and history inspection.",
-    version="1.3.0",
+    title="Pydantic AI Modular Chatbot API",
+    description="Generic chatbot API with permissions, in-memory chat history, out-of-band delivery, and adaptable HITL.",
+    version="2.0.0",
 )
 
 # -----------------------------------------------------------------------------
@@ -34,7 +32,7 @@ app = FastAPI(
 # Maps (user_id, session_id) -> list[ModelMessage]
 SESSIONS: Dict[Tuple[str, str], List[ModelMessage]] = {}
 
-# Maps action_id -> dict with action details
+# Maps action_id -> dict with generic action details
 PENDING_ACTIONS: Dict[str, dict] = {}
 
 
@@ -42,10 +40,10 @@ PENDING_ACTIONS: Dict[str, dict] = {}
 async def root():
     return {
         "status": "online",
-        "description": "Pydantic AI Chatbot API with permissions, chat history, and HITL tools.",
+        "description": "Pydantic AI Chatbot API with modular permissions, history, and adaptable HITL.",
         "endpoints": {
             "POST /chat": "Send a prompt with user_id and optional session_id",
-            "POST /chat/resume": "Resume a paused tool with human button click",
+            "POST /chat/resume": "Generic resume endpoint for any pending human action",
             "GET /users": "View mock users and their assigned permissions",
             "GET /sessions/{user_id}": "List active sessions for a user",
             "GET /sessions/{user_id}/{session_id}/history": "Inspect full message history, tool calls, and model thinking",
@@ -62,8 +60,7 @@ async def list_users():
             "username": user.username,
             "role": user.role,
             "allowed_tools": user.allowed_tools,
-            "allowed_topics": user.allowed_topics,
-            "allowed_confidential_topics": user.allowed_confidential_topics,
+            "permissions": user.permissions,
         }
         for user_id, user in USERS_DATABASE.items()
     }
@@ -124,7 +121,6 @@ async def get_session_history(user_id: str, session_id: str):
             turn_data["parts"].append(part_info)
         inspected_turns.append(turn_data)
 
-    # Dump raw Pydantic AI message structure
     raw_serialized = ModelMessagesTypeAdapter.dump_python(history)
 
     return {
@@ -178,14 +174,15 @@ async def chat(request: ChatRequest):
         # Save updated conversation history
         SESSIONS[(user.user_id, session_id)] = result.all_messages()
 
-        # 5. Check if a tool paused for human button input
+        # 5. Check if any tool paused for human input (Generic HITL)
         if user.pending_action:
             pending = user.pending_action
             PENDING_ACTIONS[pending.action_id] = {
                 "user_id": user.user_id,
                 "session_id": session_id,
-                "action_type": pending.action_type,
-                "report_name": pending.report_name,
+                "tool_name": pending.tool_name,
+                "context_data": pending.context_data,
+                "resume_instruction": pending.resume_instruction,
             }
             return ChatResponse(
                 user_id=user.user_id,
@@ -218,8 +215,9 @@ async def chat(request: ChatRequest):
 
 @app.post("/chat/resume", response_model=ChatResponse)
 async def resume_action(request: ResumeRequest):
-    """Resumes a paused tool execution. The human button selection is injected directly
-    into user context in the background without the LLM seeing or choosing the format argument.
+    """Generic resume endpoint for any tool requiring human decision.
+    Injects the human's selection directly into user context in the background
+    without exposing variables to the LLM schema.
     """
     user = USERS_DATABASE.get(request.user_id)
     if not user:
@@ -232,31 +230,32 @@ async def resume_action(request: ResumeRequest):
             detail=f"Action ID '{request.action_id}' not found or already completed.",
         )
 
-    # 1. Background injection: inject the human's button selection directly into user context!
-    # The LLM does NOT see this format in its prompt or schema.
-    user.selected_format = request.selected_option
+    # 1. Generic background injection into UserContext
+    user.action_selections[request.action_id] = request.selected_option
+    user.last_selected_option = request.selected_option
     user.confidential_deliveries = []
     user.pending_action = None
 
-    # 2. Retrieve history
+    # 2. Retrieve conversation history
     history = SESSIONS.get((user.user_id, request.session_id), [])
 
     # 3. Instantiate agent
     agent = create_agent_for_user(user)
 
-    # 4. Continuation prompt: Simply notifies the model that button was pressed.
-    # The LLM invokes request_report_export(report_name=...) and the tool reads selected_format from deps!
-    report_name = pending_info.get("report_name", "requested_report")
-    resume_prompt = (
-        f"The user has clicked the format selection button for action '{request.action_id}'. "
-        f"Please proceed by calling 'request_report_export(report_name=\"{report_name}\")' to complete report delivery."
-    )
+    # 4. Generic continuation instruction from pending_info or standard template
+    resume_instruction = pending_info.get("resume_instruction")
+    if not resume_instruction:
+        tool_name = pending_info.get("tool_name", "the requested tool")
+        resume_instruction = (
+            f"The user has made their selection: '{request.selected_option}' for action '{request.action_id}'. "
+            f"Please proceed with executing {tool_name}."
+        )
 
     try:
-        result = await agent.run(resume_prompt, deps=user, message_history=history)
+        result = await agent.run(resume_instruction, deps=user, message_history=history)
         SESSIONS[(user.user_id, request.session_id)] = result.all_messages()
         
-        # Remove completed action from pending store
+        # Clean up completed pending action
         PENDING_ACTIONS.pop(request.action_id, None)
 
         return ChatResponse(

@@ -1,13 +1,13 @@
 """Offline test suite using Pydantic AI's TestModel.
 Verifies tool filtering, in-tool permissions, confidential redaction,
-Button HITL background injection, Verbal HITL, and message history inspection.
+Generic Button HITL background injection, Verbal HITL, and message history inspection.
 Run with: python test_offline.py
 """
 
 import asyncio
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.messages import UserPromptPart, ToolCallPart, ToolReturnPart, TextPart
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 
 from models import USERS_DATABASE, UserContext
 from tools import (
@@ -50,28 +50,37 @@ async def test_tool_visibility_filtering():
     print("[PASS] Tool visibility filtering verified.")
 
 
-async def test_button_hitl_background_injection():
-    print("\n--- Test 2: Verifying Button HITL (Background Format Injection) ---")
+async def test_button_hitl_background_injection_and_out_of_band():
+    print("\n--- Test 2: Verifying Button HITL & Out-of-Band Report Delivery ---")
     alice = USERS_DATABASE["user_alice"]
     alice.pending_action = None
-    alice.selected_format = None
+    alice.last_selected_option = None
+    alice.confidential_deliveries = []
     ctx = MockContext(deps=alice)
 
     # 1. Calling tool with report_name only (NO format parameter in signature)
     res_pause = await request_report_export(ctx, report_name="q3_financial")
     print(f"Tool response without button click:\n  {res_pause}")
-    assert "PAUSED_FOR_USER_BUTTON" in res_pause
+    assert "PAUSED_FOR_USER_SELECTION" in res_pause
     assert alice.pending_action is not None
     assert alice.pending_action.options == ["Executive Summary", "Full Raw Logs", "CSV Format"]
-    print(f"Button options dispatched: {alice.pending_action.options}")
+    print(f"Button options dispatched to UI: {alice.pending_action.options}")
 
-    # 2. Human clicks button: Injected in background via ctx.deps.selected_format!
-    alice.selected_format = "CSV Format"
+    # 2. Human clicks button: Injected in background via ctx.deps.last_selected_option!
+    alice.last_selected_option = "CSV Format"
     res_complete = await request_report_export(ctx, report_name="q3_financial")
-    print(f"\nTool response after button injection:\n  {res_complete}")
-    assert "revenue,q3,450000" in res_complete
-    assert alice.selected_format is None  # consumed
-    print("[PASS] Button HITL background format injection verified.")
+    print(f"\nTool response to LLM after button injection:\n  {res_complete}")
+    
+    # LLM receives a clean confirmation (raw report is not in LLM context)
+    assert "successfully generated" in res_complete
+    assert "revenue,q3,450000" not in res_complete
+
+    # The user receives the full unredacted report via ConfidentialDelivery!
+    assert len(alice.confidential_deliveries) == 1
+    report_delivery = alice.confidential_deliveries[0]
+    print(f"Out-of-band Delivery to User:\n  Label: {report_delivery.label}\n  Content preview: {report_delivery.content[:45]}...")
+    assert "revenue,q3,450000" in report_delivery.content
+    print("[PASS] Button HITL background injection and out-of-band delivery verified.")
 
 
 async def test_verbal_hitl_tool():
@@ -136,10 +145,10 @@ async def test_message_history_inspection():
 
 async def main():
     print("==================================================================")
-    print("Running Pydantic AI Comprehensive Test Suite (Buttons + Inspection)")
+    print("Running Pydantic AI Comprehensive Test Suite (Decoupled Architecture)")
     print("==================================================================")
     await test_tool_visibility_filtering()
-    await test_button_hitl_background_injection()
+    await test_button_hitl_background_injection_and_out_of_band()
     await test_verbal_hitl_tool()
     await test_confidential_out_of_band_delivery()
     await test_message_history_inspection()
